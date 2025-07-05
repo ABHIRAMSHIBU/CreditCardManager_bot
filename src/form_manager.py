@@ -12,6 +12,9 @@ class FormState(Enum):
     WAITING_CARD_NUMBER = "waiting_card_number"
     WAITING_EXPIRY_DATE = "waiting_expiry_date"
     WAITING_CVV = "waiting_cvv"
+    WAITING_BILLING_DATE = "waiting_billing_date"
+    WAITING_BILL_AMOUNT = "waiting_bill_amount"
+    WAITING_GRACE_DAYS = "waiting_grace_days"
 
 class FormManager:
     """Manages form state for credit card addition."""
@@ -134,4 +137,30 @@ class FormManager:
         if not cvv.isdigit():
             return False
         
-        return 3 <= len(cvv) <= 4 
+        return 3 <= len(cvv) <= 4
+    
+    def validate_billing_date(self, billing_date: str) -> bool:
+        """Validate billing date format (1-31)."""
+        try:
+            day = int(billing_date)
+            return 1 <= day <= 31
+        except ValueError:
+            return False
+    
+    def validate_bill_amount(self, amount: str) -> bool:
+        """Validate bill amount format."""
+        try:
+            # Remove currency symbols and commas
+            cleaned = amount.replace('$', '').replace(',', '').replace(' ', '')
+            value = float(cleaned)
+            return value > 0
+        except ValueError:
+            return False
+    
+    def validate_grace_days(self, grace_days: str) -> bool:
+        """Validate payment grace days format."""
+        try:
+            days = int(grace_days)
+            return 1 <= days <= 60  # Reasonable range: 1-60 days
+        except ValueError:
+            return False 

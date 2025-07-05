@@ -4,6 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from .database import DatabaseManager
 from .form_manager import FormManager, FormState
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,16 @@ class CreditCardHandlers:
             "/view_cards - View all your credit cards\n"
             "/view_card <search> - View a specific card\n"
             "/delete_card <search> - Delete a credit card\n"
+            "/status - Show status of all cards and bills\n"
+            "/set_billing - Set billing information for a card\n"
+            "/update_bill_amount - Update bill amount for a card\n"
+            "/set_due_date - Set payment grace period for a card\n"
             "/help - Show this help message\n\n"
+            "**New Billing Features:**\n"
+            "• Set billing dates and amounts\n"
+            "• Get notifications for due bills\n"
+            "• Mark bills as paid\n"
+            "• Track payment status\n\n"
             "Your data is completely private and isolated to your account only! 🔒"
         )
         
@@ -43,11 +53,22 @@ class CreditCardHandlers:
             "• `/view_cards` - View all your credit cards\n"
             "• `/view_card <bank_name or last_4_digits>` - View specific card\n"
             "• `/delete_card <bank_name or last_4_digits>` - Delete a card\n"
+            "• `/status` - Show status of all cards and bills\n"
+            "• `/set_billing` - Set billing information for a card\n"
+            "• `/update_bill_amount` - Update bill amount for a card\n"
+            "• `/set_due_date` - Set payment grace period for a card\n"
             "• `/help` - Show this help message\n\n"
             "**Examples:**\n"
             "• `/view_card HDFC` - View HDFC card\n"
             "• `/view_card 1234` - View card ending with 1234\n"
             "• `/delete_card 5678` - Delete card ending with 5678\n\n"
+            "**Billing Features:**\n"
+            "• Set billing date and amount for each card\n"
+            "• Set payment grace period (due date) for each card\n"
+            "• Update bill amounts when new bills are generated\n"
+            "• Get notifications for due bills\n"
+            "• Mark bills as paid to update next due date\n"
+            "• View status of all pending and due bills\n\n"
             "🔒 **Security:** Your data is encrypted and isolated per user!"
         )
         
@@ -235,6 +256,22 @@ class CreditCardHandlers:
             await self._handle_view_card_callback(query, user.id)
         elif query.data.startswith("delete_card_"):
             await self._handle_delete_card_callback(query, user.id)
+        elif query.data.startswith("confirm_delete_"):
+            await self._handle_confirm_delete_callback(query, user.id)
+        elif query.data.startswith("mark_paid_"):
+            await self._handle_mark_paid_callback(query, user.id)
+        elif query.data.startswith("set_billing_"):
+            await self._handle_set_billing_callback(query, user.id)
+        elif query.data.startswith("update_amount_"):
+            await self._handle_update_amount_callback(query, user.id)
+        elif query.data.startswith("set_grace_days_"):
+            await self._handle_set_grace_days_callback(query, user.id)
+        elif query.data == "view_due_bills":
+            await self._handle_view_due_bills_callback(query, user.id)
+        elif query.data == "view_pending_bills":
+            await self._handle_view_pending_bills_callback(query, user.id)
+        elif query.data == "view_all_cards":
+            await self._handle_view_all_cards_callback(query, user.id)
         elif query.data == "form_done":
             await self._handle_form_done(query, user.id)
         elif query.data == "form_cancel":
@@ -309,6 +346,44 @@ class CreditCardHandlers:
             self.form_manager.update_form_field(user.id, "cvv", text)
             self.form_manager.set_state(user.id, FormState.IDLE)
             await self._show_form_status(update, user.id)
+        
+        elif current_state == FormState.WAITING_BILLING_DATE:
+            if not self.form_manager.validate_billing_date(text):
+                await update.message.reply_text(
+                    "❌ Invalid billing date format.\n"
+                    "Please enter a day of the month (1-31)."
+                )
+                return
+            
+            self.form_manager.update_form_field(user.id, "billing_date", text)
+            self.form_manager.set_state(user.id, FormState.WAITING_BILL_AMOUNT)
+            await update.message.reply_text("💰 Please enter the bill amount (e.g., 150.00):")
+        
+        elif current_state == FormState.WAITING_BILL_AMOUNT:
+            if not self.form_manager.validate_bill_amount(text):
+                await update.message.reply_text(
+                    "❌ Invalid amount format.\n"
+                    "Please enter a valid amount (e.g., 150.00 or $150)."
+                )
+                return
+            
+            # Clean the amount
+            cleaned_amount = text.replace('$', '').replace(',', '').replace(' ', '')
+            self.form_manager.update_form_field(user.id, "bill_amount", cleaned_amount)
+            self.form_manager.set_state(user.id, FormState.IDLE)
+            await self._handle_billing_form_done(update, user.id)
+        
+        elif current_state == FormState.WAITING_GRACE_DAYS:
+            if not self.form_manager.validate_grace_days(text):
+                await update.message.reply_text(
+                    "❌ Invalid grace days format.\n"
+                    "Please enter a number between 1 and 60 days."
+                )
+                return
+            
+            self.form_manager.update_form_field(user.id, "grace_days", text)
+            self.form_manager.set_state(user.id, FormState.IDLE)
+            await self._handle_grace_days_form_done(update, user.id)
     
     async def _handle_form_field_callback(self, query, user_id: int):
         """Handle form field button callbacks."""
@@ -436,6 +511,477 @@ class CreditCardHandlers:
             return
         
         await self._show_card_for_deletion_from_query(query, card)
+    
+    async def _handle_confirm_delete_callback(self, query, user_id: int):
+        """Handle confirm delete callback."""
+        card_id = int(query.data.replace("confirm_delete_", ""))
+        card = self.db_manager.get_card_by_id(user_id, card_id)
+        
+        if not card:
+            await query.edit_message_text("❌ Card not found!")
+            return
+        
+        # Delete the card
+        success = self.db_manager.delete_card(user_id, card_id)
+        
+        if success:
+            await query.edit_message_text(
+                f"✅ **Card deleted successfully!**\n\n"
+                f"🏦 **Bank:** {card['bank_name']}\n"
+                f"💳 **Card:** •••• {card['card_number']}\n\n"
+                "The card has been permanently removed from your account."
+            )
+        else:
+            await query.edit_message_text("❌ Failed to delete card!")
+    
+    async def _handle_mark_paid_callback(self, query, user_id: int):
+        """Handle mark bill as paid callback."""
+        card_id = int(query.data.replace("mark_paid_", ""))
+        card = self.db_manager.get_card_by_id(user_id, card_id)
+        
+        if not card:
+            await query.edit_message_text("❌ Card not found!")
+            return
+        
+        # Mark bill as paid
+        success = self.db_manager.mark_bill_paid(user_id, card_id)
+        
+        if success:
+            await query.edit_message_text(
+                f"✅ **Bill marked as paid!**\n\n"
+                f"🏦 **Bank:** {card['bank_name']}\n"
+                f"💳 **Card:** •••• {card['card_number']}\n\n"
+                "Next bill date has been updated automatically."
+            )
+        else:
+            await query.edit_message_text("❌ Failed to mark bill as paid!")
+    
+    async def _handle_set_billing_callback(self, query, user_id: int):
+        """Handle set billing callback."""
+        card_id = int(query.data.replace("set_billing_", ""))
+        card = self.db_manager.get_card_by_id(user_id, card_id)
+        
+        if not card:
+            await query.edit_message_text("❌ Card not found!")
+            return
+        
+        # Start billing form
+        form_data = {"card_id": card_id}
+        self.form_manager.db_manager.save_user_session(user_id, FormState.WAITING_BILLING_DATE.value, json.dumps(form_data))
+        
+        await query.edit_message_text(
+            f"💳 **Set Billing for {card['bank_name']}**\n\n"
+            "📅 Please enter the billing date (day of month, 1-31):"
+        )
+    
+    async def _handle_update_amount_callback(self, query, user_id: int):
+        """Handle update amount callback."""
+        card_id = int(query.data.replace("update_amount_", ""))
+        card = self.db_manager.get_card_by_id(user_id, card_id)
+        
+        if not card:
+            await query.edit_message_text("❌ Card not found!")
+            return
+        
+        # Start billing form
+        form_data = {"card_id": card_id}
+        self.form_manager.db_manager.save_user_session(user_id, FormState.WAITING_BILL_AMOUNT.value, json.dumps(form_data))
+        
+        await query.edit_message_text(
+            f"💰 **Update Bill Amount for {card['bank_name']}**\n\n"
+            "Please enter the new bill amount (e.g., 150.00):"
+        )
+    
+    async def _handle_set_grace_days_callback(self, query, user_id: int):
+        """Handle set grace days callback."""
+        card_id = int(query.data.replace("set_grace_days_", ""))
+        card = self.db_manager.get_card_by_id(user_id, card_id)
+        
+        if not card:
+            await query.edit_message_text("❌ Card not found!")
+            return
+        
+        # Start grace days form
+        form_data = {"card_id": card_id}
+        self.form_manager.db_manager.save_user_session(user_id, FormState.WAITING_GRACE_DAYS.value, json.dumps(form_data))
+        
+        await query.edit_message_text(
+            f"📅 **Set Payment Due Date for {card['bank_name']}**\n\n"
+            "Please enter the number of days after billing date when payment is due (e.g., 21):"
+        )
+    
+    async def _handle_view_due_bills_callback(self, query, user_id: int):
+        """Handle view due bills callback."""
+        due_bills = self.db_manager.get_due_bills(user_id)
+        
+        if not due_bills:
+            await query.edit_message_text("✅ No due bills found!")
+            return
+        
+        message = "🚨 **DUE/OVERDUE BILLS:**\n\n"
+        keyboard = []
+        
+        for card in due_bills:
+            days_overdue = 0
+            if card['next_bill_date']:
+                from datetime import datetime
+                due_date = datetime.strptime(card['next_bill_date'], '%Y-%m-%d')
+                days_overdue = (datetime.now() - due_date).days
+            
+            message += f"⚠️ **{card['bank_name']}** (••••{card['card_number']})\n"
+            message += f"   Due: {card['next_bill_date']}"
+            if days_overdue > 0:
+                message += f" ({days_overdue} days overdue)"
+            if card['bill_amount']:
+                message += f"\n   Amount: ${card['bill_amount']}"
+            message += "\n\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"✅ Mark Paid - {card['bank_name']}", 
+                    callback_data=f"mark_paid_{card['id']}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("❌ Close", callback_data="close_view")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def _handle_view_pending_bills_callback(self, query, user_id: int):
+        """Handle view pending bills callback."""
+        pending_bills = self.db_manager.get_pending_bills(user_id)
+        
+        if not pending_bills:
+            await query.edit_message_text("✅ No pending bills found!")
+            return
+        
+        message = "📅 **PENDING BILLS:**\n\n"
+        keyboard = []
+        
+        for card in pending_bills:
+            message += f"📋 **{card['bank_name']}** (••••{card['card_number']})\n"
+            message += f"   Due: {card['next_bill_date']}"
+            if card['bill_amount']:
+                message += f"\n   Amount: ${card['bill_amount']}"
+            message += "\n\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"✅ Mark Paid - {card['bank_name']}", 
+                    callback_data=f"mark_paid_{card['id']}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("❌ Close", callback_data="close_view")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def _handle_view_all_cards_callback(self, query, user_id: int):
+        """Handle view all cards callback."""
+        cards = self.db_manager.get_user_cards(user_id)
+        
+        if not cards:
+            await query.edit_message_text("❌ No cards found!")
+            return
+        
+        message = "💳 **Your Credit Cards:**\n\n"
+        keyboard = []
+        
+        for card in cards:
+            message += f"🏦 **{card['bank_name']}** (••••{card['card_number']})\n"
+            message += f"   Expires: {card['expiry_date']}\n"
+            if card.get('next_bill_date'):
+                message += f"   Next Bill: {card['next_bill_date']}\n"
+            if card.get('bill_amount'):
+                message += f"   Amount: ${card['bill_amount']}\n"
+            message += "\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"👁️ View - {card['bank_name']}", 
+                    callback_data=f"view_card_{card['id']}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("❌ Close", callback_data="close_view")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def _handle_billing_form_done(self, update: Update, user_id: int):
+        """Handle billing form completion."""
+        form_data = self.form_manager.get_form_data(user_id)
+        if not form_data or not form_data.get('bill_amount'):
+            await update.message.reply_text("❌ Bill amount is required!")
+            return
+        
+        # Get the card ID from form data
+        card_id = form_data.get('card_id')
+        if not card_id:
+            await update.message.reply_text("❌ Card not found!")
+            return
+        
+        # Check if this is updating amount only or setting full billing info
+        if form_data.get('billing_date'):
+            # Setting full billing information
+            success = self.db_manager.update_billing_info(
+                user_id, 
+                card_id, 
+                int(form_data['billing_date']), 
+                float(form_data['bill_amount'])
+            )
+            
+            if success:
+                await update.message.reply_text(
+                    "✅ **Billing information updated successfully!**\n\n"
+                    f"📅 **Billing Date:** {form_data['billing_date']}th of each month\n"
+                    f"💰 **Bill Amount:** ${form_data['bill_amount']}\n\n"
+                    "You'll receive notifications when bills are due!"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to update billing information!")
+        else:
+            # Updating amount only
+            success = self.db_manager.update_bill_amount(
+                user_id, 
+                card_id, 
+                float(form_data['bill_amount'])
+            )
+            
+            if success:
+                await update.message.reply_text(
+                    "✅ **Bill amount updated successfully!**\n\n"
+                    f"💰 **New Amount:** ${form_data['bill_amount']}\n\n"
+                    "The bill amount has been updated for this card."
+                )
+            else:
+                await update.message.reply_text("❌ Failed to update bill amount!")
+        
+        self.form_manager.clear_form(user_id)
+    
+    async def _handle_grace_days_form_done(self, update: Update, user_id: int):
+        """Handle grace days form completion."""
+        form_data = self.form_manager.get_form_data(user_id)
+        if not form_data or not form_data.get('grace_days'):
+            await update.message.reply_text("❌ Grace days is required!")
+            return
+        
+        # Get the card ID from form data
+        card_id = form_data.get('card_id')
+        if not card_id:
+            await update.message.reply_text("❌ Card not found!")
+            return
+        
+        # Update grace days
+        success = self.db_manager.update_payment_grace_days(
+            user_id, 
+            card_id, 
+            int(form_data['grace_days'])
+        )
+        
+        if success:
+            await update.message.reply_text(
+                "✅ **Payment due date updated successfully!**\n\n"
+                f"📅 **Grace Period:** {form_data['grace_days']} days after billing date\n\n"
+                "This will be used to calculate accurate due dates for future bills."
+            )
+        else:
+            await update.message.reply_text("❌ Failed to update payment due date!")
+        
+        self.form_manager.clear_form(user_id)
+    
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show status of all cards and bills."""
+        user = update.effective_user
+        if not user:
+            return
+        
+        # Get all cards
+        cards = self.db_manager.get_user_cards(user.id)
+        if not cards:
+            await update.message.reply_text(
+                "📊 **Status Report**\n\n"
+                "You don't have any credit cards added yet.\n"
+                "Use /add_card to add your first card!"
+            )
+            return
+        
+        # Get pending and due bills
+        pending_bills = self.db_manager.get_pending_bills(user.id)
+        due_bills = self.db_manager.get_due_bills(user.id)
+        
+        message = "📊 **Credit Card Status Report**\n\n"
+        
+        # Summary
+        total_cards = len(cards)
+        total_pending = len(pending_bills)
+        total_due = len(due_bills)
+        
+        message += f"📈 **Summary:**\n"
+        message += f"• Total Cards: {total_cards}\n"
+        message += f"• Pending Bills: {total_pending}\n"
+        message += f"• Due/Overdue: {total_due}\n\n"
+        
+        if due_bills:
+            message += "🚨 **DUE/OVERDUE BILLS:**\n"
+            for card in due_bills:
+                days_overdue = 0
+                if card['next_bill_date']:
+                    from datetime import datetime
+                    due_date = datetime.strptime(card['next_bill_date'], '%Y-%m-%d')
+                    days_overdue = (datetime.now() - due_date).days
+                
+                message += f"⚠️ **{card['bank_name']}** (••••{card['card_number']})\n"
+                message += f"   Due: {card['next_bill_date']}"
+                if days_overdue > 0:
+                    message += f" ({days_overdue} days overdue)"
+                if card['bill_amount']:
+                    message += f"\n   Amount: ${card['bill_amount']}"
+                message += "\n\n"
+        
+        if pending_bills and not due_bills:
+            message += "📅 **UPCOMING BILLS:**\n"
+            for card in pending_bills[:5]:  # Show only next 5
+                message += f"📋 **{card['bank_name']}** (••••{card['card_number']})\n"
+                message += f"   Due: {card['next_bill_date']}"
+                if card['bill_amount']:
+                    message += f"\n   Amount: ${card['bill_amount']}"
+                message += "\n\n"
+        
+        # Add action buttons
+        keyboard = []
+        if due_bills:
+            keyboard.append([InlineKeyboardButton("🚨 View Due Bills", callback_data="view_due_bills")])
+        if pending_bills:
+            keyboard.append([InlineKeyboardButton("📅 View All Pending", callback_data="view_pending_bills")])
+        keyboard.append([InlineKeyboardButton("💳 View All Cards", callback_data="view_all_cards")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        
+        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def set_billing_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set billing information for a card."""
+        user = update.effective_user
+        if not user:
+            return
+        
+        # Get user's cards
+        cards = self.db_manager.get_user_cards(user.id)
+        if not cards:
+            await update.message.reply_text(
+                "❌ You don't have any credit cards added yet.\n"
+                "Use /add_card to add your first card!"
+            )
+            return
+        
+        # Show card selection
+        keyboard = []
+        for card in cards:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{card['bank_name']} (••••{card['card_number']})", 
+                    callback_data=f"set_billing_{card['id']}"
+                )
+            ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "💳 **Set Billing Information**\n\n"
+            "Select a card to set billing information:",
+            reply_markup=reply_markup
+        )
+    
+    async def update_bill_amount_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Update bill amount for a card."""
+        user = update.effective_user
+        if not user:
+            return
+        
+        # Get user's cards that have billing information
+        cards = self.db_manager.get_user_cards(user.id)
+        if not cards:
+            await update.message.reply_text(
+                "❌ You don't have any credit cards added yet.\n"
+                "Use /add_card to add your first card!"
+            )
+            return
+        
+        # Filter cards that have billing information
+        cards_with_billing = [card for card in cards if card.get('billing_date') is not None]
+        
+        if not cards_with_billing:
+            await update.message.reply_text(
+                "❌ None of your cards have billing information set.\n"
+                "Use /set_billing to set billing information first!"
+            )
+            return
+        
+        # Show card selection
+        keyboard = []
+        for card in cards_with_billing:
+            current_amount = card.get('bill_amount', 'Not set')
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{card['bank_name']} (••••{card['card_number']}) - ${current_amount}", 
+                    callback_data=f"update_amount_{card['id']}"
+                )
+            ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "💰 **Update Bill Amount**\n\n"
+            "Select a card to update its bill amount:",
+            reply_markup=reply_markup
+        )
+    
+    async def set_due_date_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set payment grace days (due date) for a card."""
+        user = update.effective_user
+        if not user:
+            return
+        
+        # Get user's cards that have billing information
+        cards = self.db_manager.get_user_cards(user.id)
+        if not cards:
+            await update.message.reply_text(
+                "❌ You don't have any credit cards added yet.\n"
+                "Use /add_card to add your first card!"
+            )
+            return
+        
+        # Filter cards that have billing information
+        cards_with_billing = [card for card in cards if card.get('billing_date') is not None]
+        
+        if not cards_with_billing:
+            await update.message.reply_text(
+                "❌ None of your cards have billing information set.\n"
+                "Use /set_billing to set billing information first!"
+            )
+            return
+        
+        # Show card selection
+        keyboard = []
+        for card in cards_with_billing:
+            current_grace_days = card.get('payment_grace_days', 21)
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{card['bank_name']} (••••{card['card_number']}) - {current_grace_days} days", 
+                    callback_data=f"set_grace_days_{card['id']}"
+                )
+            ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "📅 **Set Payment Due Date**\n\n"
+            "Select a card to set payment grace days (how many days after billing date the payment is due):",
+            reply_markup=reply_markup
+        )
     
     async def _show_card_details(self, update: Update, card: Dict[str, Any]):
         """Show card details."""

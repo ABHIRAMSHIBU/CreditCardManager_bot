@@ -46,6 +46,10 @@ class CreditCardBot:
         self.application.add_handler(CommandHandler("view_cards", self.handlers.view_cards_command))
         self.application.add_handler(CommandHandler("view_card", self.handlers.view_card_command))
         self.application.add_handler(CommandHandler("delete_card", self.handlers.delete_card_command))
+        self.application.add_handler(CommandHandler("status", self.handlers.status_command))
+        self.application.add_handler(CommandHandler("set_billing", self.handlers.set_billing_command))
+        self.application.add_handler(CommandHandler("update_bill_amount", self.handlers.update_bill_amount_command))
+        self.application.add_handler(CommandHandler("set_due_date", self.handlers.set_due_date_command))
         
         # Callback query handler for inline keyboards
         self.application.add_handler(CallbackQueryHandler(self.handlers.handle_callback_query))
@@ -64,9 +68,12 @@ class CreditCardBot:
         
         # Send a user-friendly error message
         if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ Sorry, something went wrong. Please try again later."
-            )
+            try:
+                await update.effective_message.reply_text(
+                    "❌ Sorry, something went wrong. Please try again later."
+                )
+            except Exception as e:
+                logger.error(f"Failed to send error message: {e}")
     
     def start(self):
         """Start the bot."""
