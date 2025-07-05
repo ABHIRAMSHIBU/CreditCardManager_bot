@@ -1,3 +1,7 @@
+# Credit Card Management Bot - Python Dependencies
+# Copyright (C) 2025 Abhiram Shibu
+# Licensed under GNU General Public License v3.0
+
 python-telegram-bot==20.7
 python-dotenv==1.0.0
 pytest==7.4.3

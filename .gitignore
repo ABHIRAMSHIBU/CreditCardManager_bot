@@ -1,3 +1,7 @@
+# Credit Card Management Bot - Git Ignore Rules
+# Copyright (C) 2025 Abhiram Shibu
+# Licensed under GNU General Public License v3.0
+
 # Environment variables
 .env
 
